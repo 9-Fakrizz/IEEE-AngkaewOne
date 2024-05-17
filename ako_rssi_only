@@ -1,0 +1,343 @@
+
+#include <ESP32Servo.h>
+#include <LiquidCrystal_I2C.h> 
+#include <MPU6050_tockn.h>
+#include <WiFi.h>
+#include <MQTT.h>
+#include <Wire.h> 
+
+#define bldc1 4
+#define bldc2 5
+#define in1 12
+#define in2 14
+
+#define ANSWERSIZE 1
+
+#define COLUMNS 16
+#define ROWS    2
+
+// Define a structure to hold point coordinates
+struct Point {
+    float x =0;
+    float y =0;
+    float x2 =0;
+    float y2 =0;
+};
+
+const char ssid[] = "OPPOReno2";
+const char pass[] = "1234567890";
+
+const char mqtt_broker[] = "test.mosquitto.org";
+const char mqtt_topic[] = "robot/control";
+const char mqtt_client_id[] = "angkaewone"; // must change this string to a unique value
+int MQTT_PORT = 1883;
+
+const int node_count = 3;
+const int SLAVE_ADDR[node_count] = {4,5,6};
+const int pump_pin[3] = {15,16,17};
+int distance[node_count] = {};
+bool pump_status = LOW;
+
+int throttleValue1 = 180;
+int throttleValue2 = 180;
+int reverse1 = LOW;
+int reverse2 = LOW;
+long timer = 0;
+
+
+// Initialize variables for circle 
+Point center_circle[3] = {};
+Point point[3] = {};
+Point point_avg; 
+
+MPU6050 mpu6050(Wire);
+LiquidCrystal_I2C lcd(0x27, COLUMNS, ROWS);
+Servo ESC1;
+Servo ESC2;
+
+WiFiClient net;
+MQTTClient client;
+
+void connect() {
+  //Serial.print("Checking WiFi...");
+  while (WiFi.status() != WL_CONNECTED) {
+    Serial.print(".");
+    delay(1000);
+  }
+
+  //Serial.print("\nConnecting to MQTT broker...");
+  while (!client.connect(mqtt_client_id)) {
+    Serial.print(".");
+    delay(1000);
+  }
+
+  //Serial.println("\nConnected to MQTT broker!");
+
+  client.subscribe(mqtt_topic);
+}
+
+void messageReceived(String &topic, String &payload) {
+  //Serial.println("Message received: " + payload);
+  
+  if(payload == "p0"){
+    digitalWrite(pump_pin[0],HIGH);
+    delay(5000);
+    digitalWrite(pump_pin[0],LOW);
+  }
+  else if(payload == "p1"){
+    digitalWrite(pump_pin[1],HIGH);
+    delay(5000);
+    digitalWrite(pump_pin[1],LOW);
+  }
+  else if(payload == "p2"){
+    digitalWrite(pump_pin[2],HIGH);
+    delay(5000);
+    digitalWrite(pump_pin[2],LOW);
+  }
+  else if(payload == "poff"){
+    digitalWrite(pump_pin[0],LOW);
+    digitalWrite(pump_pin[1],LOW);
+    digitalWrite(pump_pin[2],LOW);
+  }
+  
+}
+
+// Function to find the intersection points of two circles
+Point findCircleIntersection(Point center1, double radius1, Point center2, double radius2) {
+    double d = sqrt(sq(center2.x - center1.x) + sq(center2.y - center1.y));
+    Point intersection;
+
+    if (d > radius1 + radius2 || d < abs(radius1 - radius2)) {
+        Serial.println("No intersection points.");
+        return intersection;;
+    }
+
+    double a = (sq(radius1) - sq(radius2) + sq(d)) / (2 * d);
+    double h = sqrt(sq(radius1) - sq(a));
+
+    intersection.x = center1.x + a * (center2.x - center1.x) / d;
+    intersection.y = center1.y + a * (center2.y - center1.y) / d;
+    intersection.x2 = intersection.x + h * (center2.y - center1.y) / d;
+    intersection.y2 = intersection.y - h * (center2.x - center1.x) / d;
+
+    // Serial.println("Intersection points:");
+    // Serial.print("Point 1: (");
+    // Serial.print(intersection1.x);
+    // Serial.print(", ");
+    // Serial.print(intersection1.y);
+    // Serial.println(")");
+    // Serial.print("Point 2: (");
+    // Serial.print(intersection2.x);
+    // Serial.print(", ");
+    // Serial.print(intersection2.y);
+    // Serial.println(")");
+    return intersection;
+}
+
+int receive_i2c(int node_addr){
+  //Serial.println("Receive data node_addr: " +String(node_addr));
+  // Read response from Slave---------
+  Wire.requestFrom(node_addr,ANSWERSIZE);
+
+  // Add characters to string
+  String text_response = "";
+  byte response[ANSWERSIZE];
+  while (Wire.available()) {
+    for (byte i=0;i<ANSWERSIZE;i++) {
+       response[i] = (byte)Wire.read();
+    }
+  } 
+  for (byte i = 0; i < ANSWERSIZE; i++) {
+    //Serial.print(char(response[i]));
+    text_response += (char)response[i];
+  }
+  //Serial.println(" m");
+  return text_response.toFloat() + 1.0;
+}
+
+
+void increaseThrottle1() {
+  if (throttleValue1 < 180) {
+    throttleValue1 += 5; // Increase throttle by 2 for ESC1
+    ESC1.write(throttleValue1);
+  }
+}
+
+void decreaseThrottle1() {
+  if (throttleValue1 > 0) {
+    throttleValue1 -= 5; // Decrease throttle by 2 for ESC1
+    ESC1.write(throttleValue1);
+  }
+}
+
+void increaseThrottle2() {
+  if (throttleValue2 < 180) {
+    throttleValue2 += 5; // Increase throttle by 2 for ESC2
+    ESC2.write(throttleValue2);
+  }
+}
+
+void decreaseThrottle2() {
+  if (throttleValue2 > 0) {
+    throttleValue2 -= 5; // Decrease throttle by 2 for ESC2
+    ESC2.write(throttleValue2);
+  }
+}
+
+void setup()
+{
+  Wire.begin(21,22);
+  Serial.begin(115200);
+  delay(100);
+
+  lcd.begin(16, 2);  
+  lcd.clear();           
+  lcd.backlight();  
+
+  ESC1.attach(bldc1, 1000, 2000);
+  ESC2.attach(bldc2, 1000, 2000);
+
+  pinMode(in1, OUTPUT);
+  pinMode(in2, OUTPUT);
+  digitalWrite(in1, LOW);
+  digitalWrite(in2, LOW);
+
+  // lcd.setCursor(2, 0);
+  // lcd.print("Setup BLDC ...");
+
+  // ESC1.write(throttleValue1);
+  // ESC2.write(throttleValue2);
+
+  // delay(5000);
+  // throttleValue1 = 0;
+  // throttleValue2 = 0;
+  // ESC1.write(throttleValue1);
+  // ESC2.write(throttleValue2);
+
+  // lcd.setCursor(2, 1);
+  // lcd.print("Complete.");
+  // delay(500);
+  // lcd.clear(); 
+
+  pinMode(pump_pin[0], OUTPUT);
+  pinMode(pump_pin[1], OUTPUT);
+  pinMode(pump_pin[2], OUTPUT);
+  digitalWrite(pump_pin[0], LOW);
+  digitalWrite(pump_pin[1], LOW);
+  digitalWrite(pump_pin[2], LOW);
+
+  // lcd.setCursor(2, 0);
+  // lcd.print("Setup MPU ...");
+ 
+  // mpu6050.begin();
+  // mpu6050.calcGyroOffsets(true);
+
+  // lcd.setCursor(2, 1);
+  // lcd.print("Complete.");
+  // delay(500);
+  // lcd.clear(); 
+
+  // lcd.setCursor(2, 0);
+  // lcd.print("Setup WIFI ...");
+  // //WiFi.begin(ssid, pass);
+  // //client.begin(mqtt_broker, MQTT_PORT, net);
+  // //client.onMessage(messageReceived);
+  // lcd.setCursor(2, 1);
+  // lcd.print("Complete.");
+  // delay(500);
+  // lcd.clear();
+
+  center_circle[0].x = 0.0;
+  center_circle[1].x = 6.0;
+  center_circle[2].x = 0.0;
+
+  center_circle[0].y = 0.0;
+  center_circle[1].y = 0.0;
+  center_circle[2].y = 6.0;
+
+  lcd.setCursor(2, 0);
+  lcd.print("I am ready !");
+  lcd.setCursor(2, 1);
+  lcd.print("go to website");
+}
+
+void loop() {
+
+  // mpu6050.update();
+  
+  if(millis() - timer > 1000){
+    
+    timer = millis();
+    lcd.clear();
+    // Serial.println("=======================================================");
+    // Serial.print("temp : ");Serial.println(mpu6050.getTemp());
+    // Serial.print("accX : ");Serial.print(mpu6050.getAccX());
+    // Serial.print("\taccY : ");Serial.print(mpu6050.getAccY());
+    // Serial.print("\taccZ : ");Serial.println(mpu6050.getAccZ());
+  
+    // Serial.print("gyroX : ");Serial.print(mpu6050.getGyroX());
+    // Serial.print("\tgyroY : ");Serial.print(mpu6050.getGyroY());
+    // Serial.print("\tgyroZ : ");Serial.println(mpu6050.getGyroZ());
+  
+    // Serial.print("accAngleX : ");Serial.print(mpu6050.getAccAngleX());
+    // Serial.print("\taccAngleY : ");Serial.println(mpu6050.getAccAngleY());
+  
+    // Serial.print("gyroAngleX : ");Serial.print(mpu6050.getGyroAngleX());
+    // Serial.print("\tgyroAngleY : ");Serial.print(mpu6050.getGyroAngleY());
+    // Serial.print("\tgyroAngleZ : ");Serial.println(mpu6050.getGyroAngleZ());
+    for(int i = 0; i < node_count; i++){
+      distance[i] = receive_i2c(SLAVE_ADDR[i]);
+      Serial.print("distance ");
+      Serial.print(i);
+      Serial.print(" : ");
+      Serial.println(distance[i]);
+    }
+    Serial.println("----------------------------------");
+    lcd.setCursor(0, 0);
+    lcd.print((int)distance[0]);
+    lcd.print(", ");
+    lcd.print((int)distance[1]);
+    lcd.print(", ");
+    lcd.print((int)distance[2]);
+
+    
+    // Serial.print("angleX : ");Serial.print(mpu6050.getAngleX());
+    // Serial.print("\tangleY : ");Serial.print(mpu6050.getAngleY());
+    // Serial.print("\tangleZ : ");Serial.println(mpu6050.getAngleZ());
+    // Serial.println("=======================================================\n");
+
+    // Call the function to find intersection points
+    for(int i = 0; i < 3; i++){
+      int j = (i + 1) % 3; // Correcting index wrap-around
+      Point intersection = findCircleIntersection(center_circle[i], distance[i], center_circle[j], distance[j]);
+      point[i] = intersection;
+    }
+    point_avg.x = (point[0].x + ((point[2].x + point[2].x2)/2) )/2;
+    point_avg.y = (point[1].y + ((point[2].y + point[2].y2)/2) )/2;
+
+    // Output the intersection point
+    //Serial.print("Intersection Point (x, y): ");
+    Serial.print(point_avg.x);
+    Serial.print(", ");
+    Serial.println(point_avg.y);
+
+    lcd.setCursor(0, 1);
+    lcd.print("(x,y): ");
+
+    // lcd.print("(");
+    lcd.print((int)point_avg.x);
+    lcd.print(", ");
+    lcd.print((int)point_avg.y);
+    // lcd.print(")");
+
+
+  }
+
+  // client.loop();
+  // delay(10);
+
+  // if (!client.connected()) {
+  //   connect();
+  // }
+  delay(100);
+}
