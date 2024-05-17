@@ -43,6 +43,8 @@ int throttleValue2 = 180;
 int reverse1 = LOW;
 int reverse2 = LOW;
 long timer = 0;
+float c_mpu = 0.0;
+int mpu_count = 20; 
 
 
 // Initialize variables for circle 
@@ -57,6 +59,12 @@ Servo ESC2;
 
 WiFiClient net;
 MQTTClient client;
+
+hw_timer_t *My_timer = NULL;
+
+void IRAM_ATTR onTimer(){
+  mpu6050.update();
+}
 
 void connect() {
   //Serial.print("Checking WiFi...");
@@ -194,30 +202,32 @@ void setup()
   lcd.clear();           
   lcd.backlight();  
 
-  ESC1.attach(bldc1, 1000, 2000);
-  ESC2.attach(bldc2, 1000, 2000);
-
   pinMode(in1, OUTPUT);
   pinMode(in2, OUTPUT);
   digitalWrite(in1, LOW);
   digitalWrite(in2, LOW);
-
+  
+  // ------------------------------------------------ //
   lcd.setCursor(2, 0);
   lcd.print("Setup BLDC ...");
-
-  ESC1.write(throttleValue1);
-  ESC2.write(throttleValue2);
-
+  ESC1.attach(bldc1, 1000, 2000);
+  ESC2.attach(bldc2, 1000, 2000);
+  ESC1.write(0);
+  ESC2.write(0);
   delay(5000);
+  // for(int i = 180; i > 0; i--){
+  //   ESC1.write(i);
+  //   ESC2.write(i);
+  //   delay(15);
+  // }
   throttleValue1 = 0;
   throttleValue2 = 0;
-  ESC1.write(throttleValue1);
-  ESC2.write(throttleValue2);
 
   lcd.setCursor(2, 1);
   lcd.print("Complete.");
   delay(500);
   lcd.clear(); 
+  // ------------------------------------------------- //
 
   pinMode(pump_pin[0], OUTPUT);
   pinMode(pump_pin[1], OUTPUT);
@@ -226,16 +236,30 @@ void setup()
   digitalWrite(pump_pin[1], LOW);
   digitalWrite(pump_pin[2], LOW);
 
+  // ------------------------------------------------- //
   lcd.setCursor(2, 0);
   lcd.print("Setup MPU ...");
  
   mpu6050.begin();
   mpu6050.calcGyroOffsets(true);
+  
+  //set zero of mpu's angle
+  int i = 0;
+  while(i < mpu_count){
+    mpu6050.update();
+    if(millis() - timer > 100){
+      timer = millis();
+      c_mpu += mpu6050.getAngleZ();
+      i += 1;
+    }
+  }
+  c_mpu /= mpu_count;
 
   lcd.setCursor(2, 1);
   lcd.print("Complete.");
   delay(500);
   lcd.clear(); 
+  // -------------------------------------------------//
 
   lcd.setCursor(2, 0);
   lcd.print("Setup WIFI ...");
@@ -246,6 +270,8 @@ void setup()
   lcd.print("Complete.");
   delay(500);
   lcd.clear();
+
+  // ------------------------------------------------ //
 
   center_circle[0].x = 0.0;
   center_circle[1].x = 6.0;
@@ -259,14 +285,19 @@ void setup()
   lcd.print("I am ready !");
   lcd.setCursor(2, 1);
   lcd.print("go to website");
+  delay(1000);
+  lcd.clear();
+
+  // My_timer = timerBegin(0, 80, true);  // use tiemr 0 and set prescale to 80 so 1 tick is 1 uSec
+  // timerAttachInterrupt(My_timer, &onTimer, true); // point to the ISR
+  // timerAlarmWrite(My_timer, 1000000, true);  // set alarm every 1 sec
+  // timerAlarmEnable(My_timer);  // enable the alarm
 }
 
 void loop() {
 
   mpu6050.update();
-  
-  if(millis() - timer > 100){
-    
+  if(millis() - timer > 1000){
     timer = millis();
     // Serial.println("=======================================================");
     // Serial.print("temp : ");Serial.println(mpu6050.getTemp());
@@ -286,16 +317,27 @@ void loop() {
     // Serial.print("\tgyroAngleZ : ");Serial.println(mpu6050.getGyroAngleZ());
     for(int i = 0; i < node_count; i++){
       distance[i] = receive_i2c(SLAVE_ADDR[i]);
-      // Serial.print("distance ");
-      // Serial.print(i);
-      // Serial.print(" : ");
-      // Serial.println(distance[i]);
+      Serial.print("distance ");
+      Serial.print(i);
+      Serial.print(" : ");
+      Serial.println(distance[i]);
     }
+    lcd.setCursor(0, 1);
+    lcd.print(distance[0]);
+    lcd.print(", ");
+    lcd.print(distance[1]);
+    lcd.print(", ");
+    lcd.print(distance[2]);
+
     // Serial.println("----------------------------------");
     
     // Serial.print("angleX : ");Serial.print(mpu6050.getAngleX());
     // Serial.print("\tangleY : ");Serial.print(mpu6050.getAngleY());
     // Serial.print("\tangleZ : ");Serial.println(mpu6050.getAngleZ());
+    lcd.clear();
+    lcd.setCursor(0, 0);
+    lcd.print("angle : ");
+    lcd.print((int)(mpu6050.getAngleZ() - c_mpu));
     // Serial.println("=======================================================\n");
 
     // Call the function to find intersection points
@@ -309,17 +351,24 @@ void loop() {
 
     // Output the intersection point
     //Serial.print("Intersection Point (x, y): ");
-    Serial.print(point_avg.x);
+    Serial.print((int)point_avg.x);
     Serial.print(", ");
-    Serial.println(point_avg.y);
+    Serial.println((int)point_avg.y);
+    // lcd.setCursor(0, 1);
+    // lcd.print("(x,y): ");
+
+    // // lcd.print("(");
+    // lcd.print((int)point_avg.x);
+    // lcd.print(", ");
+    // lcd.print((int)point_avg.y);
+    // // lcd.print(")");
 
   }
-
   // client.loop();
   // delay(10);
 
   // if (!client.connected()) {
   //   connect();
   // }
-  delay(100);
+  //delay(100);
 }
