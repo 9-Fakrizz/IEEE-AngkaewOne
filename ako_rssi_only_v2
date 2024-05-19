@@ -152,7 +152,7 @@ int receive_i2c(int node_addr){
     text_response += (char)response[i];
   }
   //Serial.println(" m");
-  return text_response.toFloat() + 1.5;
+  return text_response.toFloat() + 1.0;
 }
 
 
@@ -248,12 +248,12 @@ void setup()
   // lcd.clear();
 
   center_circle[0].x = 0.0;
-  center_circle[1].x = 5.0;
+  center_circle[1].x = 6.0;
   center_circle[2].x = 0.0;
 
   center_circle[0].y = 0.0;
   center_circle[1].y = 0.0;
-  center_circle[2].y = 5.0;
+  center_circle[2].y = 6.0;
 
   lcd.setCursor(2, 0);
   lcd.print("I am ready !");
@@ -265,8 +265,7 @@ void loop() {
 
   // mpu6050.update();
   
-  if(millis() - timer > 1000){
-    
+  if(millis() - timer > 200){
     timer = millis();
     lcd.clear();
     // Serial.println("=======================================================");
@@ -285,6 +284,7 @@ void loop() {
     // Serial.print("gyroAngleX : ");Serial.print(mpu6050.getGyroAngleX());
     // Serial.print("\tgyroAngleY : ");Serial.print(mpu6050.getGyroAngleY());
     // Serial.print("\tgyroAngleZ : ");Serial.println(mpu6050.getGyroAngleZ());
+    
     for(int i = 0; i < node_count; i++){
       distance[i] = receive_i2c(SLAVE_ADDR[i]);
       Serial.print("distance ");
@@ -301,16 +301,15 @@ void loop() {
     lcd.print((int)distance[2]);
 
     
-    // Serial.print("angleX : ");Serial.print(mpu6050.getAngleX());
-    // Serial.print("\tangleY : ");Serial.print(mpu6050.getAngleY());
-    // Serial.print("\tangleZ : ");Serial.println(mpu6050.getAngleZ());
-    Serial.println("=======================================================\n");
-
     // Call the function to find intersection points
     for(int i = 0; i < 3; i++){
       int j = (i + 1) % 3; // Correcting index wrap-around
-      Point intersection = findCircleIntersection(center_circle[i], distance[i], center_circle[j], distance[j]);
+      Point intersection = findCircleIntersection(center_circle[j], distance[j], center_circle[i], distance[i]);
       point[i] = intersection;
+      Serial.print(i);
+      Serial.print(" and ");
+      Serial.print(j);
+      Serial.print(" >>   ");
       Serial.print(point[i].x);
       Serial.print(", ");
       Serial.print(point[i].y);
@@ -319,8 +318,8 @@ void loop() {
       Serial.print(", ");
       Serial.println(point[i].y2);
     }
-    point_avg.x = (point[0].x + point[1].x)/2;
-    point_avg.y = (point[1].y + point[2].y)/2;
+    point_avg.x = (point[0].x2 + point[1].x2 + point[2].x2 )/3;
+    point_avg.y = (point[0].y2 + point[1].y2 + point[3].y2 )/3;
     // point_avg.x = (point[0].x + ((point[2].x + point[2].x2)/2) )/2;
     // point_avg.y = (point[1].y + ((point[2].y + point[2].y2)/2) )/2;
 
@@ -331,14 +330,13 @@ void loop() {
     Serial.println(point_avg.y);
 
     lcd.setCursor(0, 1);
-    lcd.print("(x,y): ");
+    lcd.print(" ");
 
     // lcd.print("(");
-    lcd.print((int)point_avg.x);
-    lcd.print(", ");
-    lcd.print((int)point_avg.y);
+    lcd.print(point_avg.x);
+    lcd.print(",");
+    lcd.print(point_avg.y);
     // lcd.print(")");
-
 
   }
 
