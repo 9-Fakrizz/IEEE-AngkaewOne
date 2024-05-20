@@ -1,1 +1,602 @@
+// Exmaple of using the MQTT library for ESP32
+// Library by Joël Gähwiler
+// https://github.com/256dpi/arduino-mqtt
+// Modified by Arnan Sipitakiat
 
+#include <ESP32Servo.h>
+#include <MPU6050_tockn.h>
+#include <LiquidCrystal_I2C.h>
+#include <Wire.h>
+#include <WiFi.h>
+#include <MQTT.h>
+#include <math.h>
+
+#define bldc1 4
+#define bldc2 5
+#define in1 12
+#define in2 14
+// Define a structure to hold point coordinates
+struct Point {
+  float x = 0;
+  float y = 0;
+  float x2 = 0;
+  float y2 = 0;
+};
+
+
+long timer_bldc = 0;
+int throttleValue1 = 180;
+int throttleValue2 = 180;
+int reverse1 = LOW;
+int reverse2 = LOW;
+Servo ESC1;
+Servo ESC2;
+
+//Wifi Form Phone
+const char ssid[] = "Ok";
+const char pass[] = "q12345678";
+
+//MQTT Server Data
+const char mqtt_broker[] = "test.mosquitto.org";
+const char mqtt_topic[] = "angkaewone/1";
+const char mqtt_topictwo[] = "angkaewtwo/1";
+const char mqtt_client_id[] = "arduino_group_x";  // must change this string to a unique value
+int MQTT_PORT = 1883;
+
+int counter = 0;
+
+WiFiClient net;
+MQTTClient client;
+
+unsigned long lastMillis = 0;
+
+//messageReceived Variable coordinates
+// Define the points with unique variable names
+float x_start = 0, y_start = 0;
+float x_point1 = 0, y_point1 = 0;
+float x_point2 = 0, y_point2 = 0;
+float x_point3 = 0, y_point3 = 0;
+
+int x_point = 0, y_point = 0;
+
+// Function to calculate distance
+float calculateDistance(float x1, float y1, float x2, float y2) {
+  return sqrt(pow(x2 - x1, 2) + pow(y2 - y1, 2));
+}
+
+// Function to calculate angle in degrees
+float calculateAngle(float x1, float y1, float x2, float y2) {
+  return atan2(y2 - y1, x2 - x1) * (180.0 / PI);
+}
+
+//define for direction
+int firstPoint;
+int secondPoint;
+int thirdPoint;
+int backPoint;
+
+//boolean Start
+bool startEngine = false;
+bool point1topoint2 = false;
+bool point2topoint3 = false;
+bool point3tostartEngine = false;
+int timerCounting = 0;
+
+char buf1[100], buf2[100], buf3[100], buf4[100], buf5[100], buf6[100];
+char result1[10], result2[10], result3[10], result4[10], result5[10], result6[10];
+Point coordinates[3];
+int payloadCount;
+int currentIntIndex = 0;
+
+//Gyro Variable
+MPU6050 mpu6050(Wire);
+
+int constant_angle = 0;
+LiquidCrystal_I2C lcd(0x27, 16, 2);
+long timer = 0;
+
+//Define for PID Using Function
+int angle;
+int rightPIDPosition;
+int leftPIDPosition;
+
+float extractNumber(String &str);
+
+void connect() {
+  lcd.setCursor(0, 0);
+  lcd.print("checking wifi...");
+  Serial.print("checking wifi...");
+  lcd.setCursor(15, 0);
+  while (WiFi.status() != WL_CONNECTED) {
+    lcd.print(".");
+    delay(1000);
+  }
+
+  lcd.setCursor(0, 0);
+  lcd.clear();
+  lcd.print("connecting...");
+  Serial.print("\nconnecting...");
+  lcd.setCursor(15, 0);
+  while (!client.connect(mqtt_client_id)) {
+    lcd.print(".");
+    delay(1000);
+  }
+
+  lcd.clear();
+  lcd.print("connected!");
+  Serial.println("\nconnected!");
+
+  delay(500);
+
+  client.subscribe(mqtt_topic);
+  // client.unsubscribe("/hello");
+}
+
+void messageReceived(String &topic, String &payload) {
+  //store from payload to coordinates array
+  currentIntIndex = currentIntIndex % 3;
+  if (payload) {
+    payload.toCharArray(buf1, 100);
+    payload.toCharArray(buf2, 100);
+    StrContains(buf1, "x", result1);
+    StrContains(buf2, "y", result2);
+
+    Serial.print("messageReceivedCounting : ");
+    Serial.println(currentIntIndex);
+
+    if (strcmp(result1, "Found") == 0) {
+      x_point = extractNumber(payload);
+      coordinates[currentIntIndex].x = x_point;
+      Serial.print("Stored X: ");
+      Serial.println(coordinates[currentIntIndex].x);
+    }
+
+    if (strcmp(result2, "Found") == 0) {
+      y_point = extractNumber(payload);
+      coordinates[currentIntIndex].y = y_point;
+      Serial.print("Stored Y: ");
+      Serial.println(coordinates[currentIntIndex].y);
+    }
+    currentIntIndex++;
+  }
+  if(currentIntIndex == 3) {
+    Serial.println("Array is full. Cannot store more strings.");
+    client.publish(mqtt_topictwo, "FULL.");
+    startEngine = false;
+    for(int i = 0; i < currentIntIndex; i++){
+      Serial.print("point ");
+      Serial.print(i);
+      Serial.print(" >> ");
+      Serial.print(coordinates[i].x);
+      Serial.print(", ");
+      Serial.println(coordinates[i].y);
+    }
+  }
+}
+
+float extractNumber(String &str) {
+  String numberStr = "";     // Store the extracted number as a string
+  int number = 0;            // Store the extracted number as a float
+  bool foundNumber = false;  // Flag to track if a number has been found
+  bool hasDecimal = false;   // Flag to track if a decimal point has been found
+  int charCount = 0;
+
+  // Iterate through each character of the string
+  for (int i = 0; i < str.length(); i++) {
+    char c = str.charAt(i);
+    charCount++;
+
+    // Check if the character is a digit or a decimal point
+    if (isdigit(c) || (c == '.' && !hasDecimal)) {
+      numberStr += c;      // Append digit or decimal point to the number string
+      foundNumber = true;  // Set the flag indicating a number has been found
+      if (c == '.') {
+        hasDecimal = true;  // Set the flag indicating a decimal point has been found
+      }
+    } else if (foundNumber) {
+      // If a number has been found and we encounter a non-digit/non-decimal character,
+      // break out of the loop
+      break;
+    }
+  }
+
+  // Convert the number string to a Int
+  number = numberStr.toInt();
+
+  // Remove the extracted number from the original string
+  if (foundNumber) {
+    str.remove(0, charCount);
+  }
+  return number;  // Return the extracted number
+}
+
+void StrContains(char *str, const char *sfind, char *result) {
+  int found = 0;
+  int index = 0;
+  int len = strlen(str);
+  int sfindLen = strlen(sfind);
+
+  if (sfindLen > len) {
+    strcpy(result, "NotFound");
+    return;
+  }
+
+  while (index < len) {
+    if (str[index] == sfind[found]) {
+      found++;
+      if (sfindLen == found) {
+        strcpy(result, "Found");
+        return;
+      }
+    } else {
+      found = 0;
+    }
+    index++;
+  }
+  strcpy(result, "NotFound");
+}
+
+void setup() {
+  Serial.begin(115200);
+  Wire.begin();
+
+  lcd.begin(16, 2);
+  lcd.backlight();
+  lcd.clear();
+
+  //Brushless setup
+  pinMode(in1, OUTPUT);
+  pinMode(in2, OUTPUT);
+  digitalWrite(in1, LOW);
+  digitalWrite(in2, LOW);
+  startEngine = true;
+  point1topoint2 = false;
+  point2topoint3 = false;
+  point3tostartEngine = false;
+
+  lcd.setCursor(2, 0);
+  lcd.print("Setup BLDC ...");
+  ESC1.attach(bldc1, 1000, 2000);
+  ESC2.attach(bldc2, 1000, 2000);
+  ESC1.write(0);
+  ESC2.write(0);
+  delay(5000);
+  throttleValue1 = 0;
+  throttleValue2 = 0;
+
+  lcd.setCursor(2, 1);
+  lcd.print("Complete.");
+  delay(500);
+  lcd.clear();
+
+  Wire.begin();
+
+  mpu6050.begin();
+  lcd.setCursor(0, 0);
+  lcd.print("Calculating gyro");
+  lcd.setCursor(0, 1);
+  lcd.print("DO NOT MOVE MPU.");
+  mpu6050.calcGyroOffsets(true);
+  lcd.clear();
+  lcd.setCursor(0, 0);
+  lcd.print("  Program Will  ");
+  lcd.setCursor(0, 1);
+  lcd.print("Start in 3 Sec..");
+  //delay(3000);
+  lcd.clear();
+  mpu6050.update();
+  Serial.print("\tangleZ : ");
+  Serial.println(mpu6050.getAngleZ());
+  constant_angle = mpu6050.getAngleZ();
+  timer = millis();
+  lcd.clear();
+
+  // setup wifi and mqtt
+  WiFi.begin(ssid, pass);
+  client.begin(mqtt_broker, MQTT_PORT, net);
+  client.onMessage(messageReceived);
+  connect();
+}
+
+void loop() {
+  client.loop();
+  delay(10);  // <- fixes some issues with WiFi stability
+
+  if (!client.connected()) {
+    connect();
+  }
+
+  if (millis() - lastMillis > 1000) {
+    lastMillis = millis();
+  }
+
+  realTimeAngle();
+
+
+  int AngletoPoint1 = 51;
+  int AngletoPoint2 = 315;
+  int AngletoPoint3 = 45;
+  int Angletoback = 215;
+
+  // while (startEngine == true) {
+  //   //PID Function Setting
+  //   rightPIDPosition = map(angle, 0, AngletoPoint1, 12, 6);
+  //   leftPIDPosition = map(angle, AngletoPoint1, 360, 6, 12);
+
+  //   if (angle >= 0 && angle < AngletoPoint1 - 9) {
+  //     Serial.print("Brushless Right on at :");
+  //     Serial.println(rightPIDPosition);
+  //     ESC2.write(rightPIDPosition);
+  //     Serial.println("เข้า BL ขวา");
+  //   } else {
+  //     ESC2.write(0);
+  //   }
+
+  //   if (angle >= AngletoPoint1 + 10 && angle < 361) {
+  //     Serial.print("Brushless Left on at :");
+  //     Serial.println(leftPIDPosition);
+  //     ESC1.write(leftPIDPosition);
+  //     Serial.println("เข้า BL ซ้าย");
+  //   } else {
+  //     ESC1.write(0);
+  //   }
+
+  //   if (angle == AngletoPoint1 + 4) {
+  //     ESC1.write(8);
+  //   }
+
+  //   if (angle == AngletoPoint1 - 4) {
+  //     ESC2.write(8);
+  //   }
+
+  //   timer_bldc = millis();
+
+  //   while ((angle >= AngletoPoint1 - 5 && angle <= AngletoPoint1 + 5) && millis() - timer_bldc <= 2050) {
+  //     ESC1.write(8);
+  //     ESC2.write(8);
+  //     Serial.println("in loop");
+
+  //     Serial.println(millis() - timer_bldc);
+  //     if (millis() - timer_bldc >= 2000) {
+
+  //       digitalWrite(in1, HIGH);
+  //       digitalWrite(in2, HIGH);
+  //       delay(20);
+  //       ESC1.write(8);
+  //       ESC1.write(8);
+  //       delay(1000);
+  //       ESC1.write(0);
+  //       ESC1.write(0);
+  //       delay(20);
+  //       digitalWrite(in1, LOW);
+  //       digitalWrite(in2, LOW);
+  //       delay(500);
+
+  //       startEngine = false;
+  //       point1topoint2 = true;
+  //       Serial.println("in loop อีกที");
+  //     }
+
+  //     realTimeAngle();
+  //   }
+
+  //   realTimeAngle();
+  // }
+
+  // while (point1topoint2 == true) {
+  //   //PID Function Setting
+  //   rightPIDPosition = map(angle, 0, AngletoPoint2, 12, 6);
+  //   leftPIDPosition = map(angle, AngletoPoint2, 360, 6, 12);
+
+  //   if (angle >= 0 && angle < AngletoPoint2 - 9) {
+  //     Serial.print("Brushless Right on at :");
+  //     Serial.println(rightPIDPosition);
+  //     ESC2.write(rightPIDPosition);
+  //   } else {
+  //     ESC2.write(0);
+  //   }
+
+  //   if (angle >= AngletoPoint2 + 10 && angle < 361) {
+  //     Serial.print("Brushless Left on at :");
+  //     Serial.println(leftPIDPosition);
+  //     ESC1.write(leftPIDPosition);
+  //   } else {
+  //     ESC1.write(0);
+  //   }
+
+  //   if (angle == AngletoPoint2 + 4) {
+  //     ESC1.write(8);
+  //   }
+
+  //   if (angle == AngletoPoint2 - 4) {
+  //     ESC2.write(8);
+  //   }
+
+  //   timer_bldc = millis();
+
+  //   while ((angle >= AngletoPoint2 - 5 && angle <= AngletoPoint2 + 5) && millis() - timer_bldc <= 2050) {
+  //     ESC1.write(8);
+  //     ESC2.write(8);
+  //     //Serial.println("in loop");
+
+  //     Serial.println(millis() - timer_bldc);
+  //     if (millis() - timer_bldc >= 2000) {
+
+  //       digitalWrite(in1, HIGH);
+  //       digitalWrite(in2, HIGH);
+  //       delay(20);
+  //       ESC1.write(8);
+  //       ESC1.write(8);
+  //       delay(1000);
+  //       ESC1.write(0);
+  //       ESC1.write(0);
+  //       delay(20);
+  //       digitalWrite(in1, LOW);
+  //       digitalWrite(in2, LOW);
+  //       delay(500);
+
+  //       point1topoint2 = false;
+  //       point2topoint3 = true;
+  //       timerCounting = 0;
+  //       Serial.println("in loop อีกที");
+  //     }
+
+  //     realTimeAngle();
+  //   }
+
+  //   realTimeAngle();
+  // }
+
+  // while (point2topoint3 == true) {
+  //   //PID Function Setting
+  //   rightPIDPosition = map(angle, 0, AngletoPoint3, 12, 6);
+  //   leftPIDPosition = map(angle, AngletoPoint3, 360, 6, 12);
+
+  //   if (angle >= 0 && angle < AngletoPoint3 - 9) {
+  //     Serial.print("Brushless Right on at :");
+  //     Serial.println(rightPIDPosition);
+  //     ESC2.write(rightPIDPosition);
+  //   } else {
+  //     ESC2.write(0);
+  //   }
+
+  //   if (angle >= AngletoPoint3 + 10 && angle < 361) {
+  //     Serial.print("Brushless Left on at :");
+  //     Serial.println(leftPIDPosition);
+  //     ESC1.write(leftPIDPosition);
+  //   } else {
+  //     ESC1.write(0);
+  //   }
+
+  //   if (angle == AngletoPoint3 + 4) {
+  //     ESC1.write(8);
+  //   }
+
+  //   if (angle == AngletoPoint3 - 4) {
+  //     ESC2.write(8);
+  //   }
+
+  //   timer_bldc = millis();
+
+  //   while ((angle >= AngletoPoint3 - 5 && angle <= AngletoPoint3 + 5) && millis() - timer_bldc <= 2050) {
+  //     ESC1.write(8);
+  //     ESC2.write(8);
+  //     //Serial.println("in loop");
+
+  //     Serial.println(millis() - timer_bldc);
+  //     if (millis() - timer_bldc >= 2000) {
+
+  //       digitalWrite(in1, HIGH);
+  //       digitalWrite(in2, HIGH);
+  //       delay(20);
+  //       ESC1.write(8);
+  //       ESC1.write(8);
+  //       delay(1000);
+  //       ESC1.write(0);
+  //       ESC1.write(0);
+  //       delay(20);
+  //       digitalWrite(in1, LOW);
+  //       digitalWrite(in2, LOW);
+  //       delay(500);
+
+  //       point2topoint3 = false;
+  //       point3tostartEngine = true;
+  //       timerCounting = 0;
+  //       Serial.println("in loop อีกที");
+  //     }
+
+  //     realTimeAngle();
+  //   }
+
+  //   realTimeAngle();
+  // }
+
+  // while (point3tostartEngine == true) {
+  //   //PID Function Setting
+  //   rightPIDPosition = map(angle, 0, Angletoback, 12, 6);
+  //   leftPIDPosition = map(angle, Angletoback, 360, 6, 12);
+
+  //   if (angle >= 0 && angle < Angletoback - 9) {
+  //     Serial.print("Brushless Right on at :");
+  //     Serial.println(rightPIDPosition);
+  //     ESC2.write(rightPIDPosition);
+  //   } else {
+  //     ESC2.write(0);
+  //   }
+
+  //   if (angle >= Angletoback + 10 && angle < 361) {
+  //     Serial.print("Brushless Left on at :");
+  //     Serial.println(leftPIDPosition);
+  //     ESC1.write(leftPIDPosition);
+  //   } else {
+  //     ESC1.write(0);
+  //   }
+
+  //   if (angle == Angletoback + 4) {
+  //     ESC1.write(8);
+  //   }
+
+  //   if (angle == Angletoback - 4) {
+  //     ESC2.write(8);
+  //   }
+
+  //   timer_bldc = millis();
+
+  //   while ((angle >= Angletoback - 5 && angle <= Angletoback + 5) && millis() - timer_bldc <= 2050) {
+  //     ESC1.write(8);
+  //     ESC2.write(8);
+  //     //Serial.println("in loop");
+
+  //     Serial.println(millis() - timer_bldc);
+  //     if (millis() - timer_bldc >= 2000) {
+
+  //       digitalWrite(in1, HIGH);
+  //       digitalWrite(in2, HIGH);
+  //       delay(20);
+  //       ESC1.write(8);
+  //       ESC1.write(8);
+  //       delay(1000);
+  //       ESC1.write(0);
+  //       ESC1.write(0);
+  //       delay(20);
+  //       digitalWrite(in1, LOW);
+  //       digitalWrite(in2, LOW);
+  //       delay(500);
+
+  //       point3tostartEngine = false;
+  //       timerCounting = 0;
+  //       Serial.println("in loop อีกที");
+  //     }
+
+  //     realTimeAngle();
+  //   }
+
+  //   realTimeAngle();
+  // }
+
+  delay(1);
+}
+
+void realTimeAngle() {
+
+  mpu6050.update();
+  // Serial.print("angleX : ");
+  // Serial.print(mpu6050.getAngleX());
+  // Serial.print("\tangleY : ");
+  // Serial.print(mpu6050.getAngleY());
+  if (millis() - timer > 1000) {
+    timer = millis();
+    lcd.clear();
+  }
+
+  //angle position
+  lcd.setCursor(0, 0);
+  lcd.print("angle : ");
+
+  angle = (int)(mpu6050.getAngleZ() - constant_angle);
+  angle = angle % 360;
+  if (angle < 0) {
+    angle = 360 + angle;
+  }
+  lcd.print(angle);
+}
